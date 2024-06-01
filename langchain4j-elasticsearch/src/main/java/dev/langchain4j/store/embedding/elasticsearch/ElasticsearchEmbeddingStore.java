@@ -267,27 +267,15 @@ public class ElasticsearchEmbeddingStore implements EmbeddingStore<TextSegment> 
 
     @Override
     public void remove(String id) {
-        try {
-            client.delete(DeleteRequest.of(d -> d.index(indexName).id(id)));
-        } catch (IOException e) {
-            log.error("[ElasticSearch remove I/O Exception]", e);
-            throw new ElasticsearchRequestFailedException(e.getMessage());
-        }
+        ensureNotBlank(id, "id");
+        removeAll(Collections.singleton(id));
     }
 
     @Override
     public void removeAll(Collection<String> ids) {
+        ensureNotEmpty(ids, "ids");
         try {
-            BulkRequest.Builder bulkBuilder = new BulkRequest.Builder();
-            ids.forEach(id -> bulkBuilder.operations(op -> op.delete(d -> d.index(indexName).id(id))));
-            BulkResponse response = client.bulk(bulkBuilder.build());
-            if (response.errors()) {
-                for (BulkResponseItem item : response.items()) {
-                    if (item.error() != null) {
-                        throw new ElasticsearchRequestFailedException("type: " + item.error().type() + ", reason: " + item.error().reason());
-                    }
-                }
-            }
+            removeByIds(ids);
         } catch (IOException e) {
             log.error("[ElasticSearch remove I/O Exception]", e);
             throw new ElasticsearchRequestFailedException(e.getMessage());
@@ -296,30 +284,14 @@ public class ElasticsearchEmbeddingStore implements EmbeddingStore<TextSegment> 
 
     @Override
     public void removeAll(Filter filter) {
-        try {
-            Query query = ElasticsearchMetadataFilterMapper.map(filter);
-            DeleteByQueryRequest queryRequest = new DeleteByQueryRequest.Builder()
-                    .query(query)
-                    .build();
-            deleteQueryResponse(client.deleteByQuery(queryRequest));
-        } catch (IOException e) {
-            log.error("[ElasticSearch remove I/O Exception]", e);
-            throw new ElasticsearchRequestFailedException(e.getMessage());
-        }
+        ensureNotNull(filter, "filter");
+        removeByQuery(ElasticsearchMetadataFilterMapper.map(filter));
     }
 
     @Override
     public void removeAll() {
-        try {
-            DeleteByQueryRequest queryRequest = new DeleteByQueryRequest.Builder()
-                    .index(indexName)
-                    .query(q -> q.matchAll(m -> m))
-                    .build();
-            deleteQueryResponse(client.deleteByQuery(queryRequest));
-        } catch (IOException e) {
-            log.error("[ElasticSearch remove I/O Exception]", e);
-            throw new ElasticsearchRequestFailedException(e.getMessage());
-        }
+        Query query = Query.of(q -> q.matchAll(m -> m));
+        removeByQuery(query);
     }
 
     private ScriptScoreQuery buildScriptScoreQuery(float[] vector,
@@ -434,11 +406,34 @@ public class ElasticsearchEmbeddingStore implements EmbeddingStore<TextSegment> 
                 .collect(toList());
     }
 
-    private void deleteQueryResponse(DeleteByQueryResponse response) {
-        if (response != null && response.failures() != null) {
-            for (BulkIndexByScrollFailure item : response.failures()) {
-                if (item.cause() != null) {
-                    throw new ElasticsearchRequestFailedException("type: " + item.cause().type() + ", reason: " + item.cause().reason());
+    private void removeByQuery(Query query) {
+        try {
+            DeleteByQueryRequest queryRequest = new DeleteByQueryRequest.Builder()
+                    .index(indexName)
+                    .query(query)
+                    .build();
+            DeleteByQueryResponse response = client.deleteByQuery(queryRequest);
+            if (!response.failures().isEmpty()) {
+                for (BulkIndexByScrollFailure item : response.failures()) {
+                    if (item.cause() != null) {
+                        throw new ElasticsearchRequestFailedException("type: " + item.cause().type() + ", reason: " + item.cause().reason());
+                    }
+                }
+            }
+        } catch (IOException e) {
+            log.error("[ElasticSearch remove I/O Exception]", e);
+            throw new ElasticsearchRequestFailedException(e.getMessage());
+        }
+    }
+
+    private void removeByIds(Collection<String> ids) throws IOException {
+        BulkRequest.Builder bulkBuilder = new BulkRequest.Builder();
+        ids.forEach(id -> bulkBuilder.operations(op -> op.delete(d -> d.index(indexName).id(id))));
+        BulkResponse response = client.bulk(bulkBuilder.build());
+        if (response.errors()) {
+            for (BulkResponseItem item : response.items()) {
+                if (item.error() != null) {
+                    throw new ElasticsearchRequestFailedException("type: " + item.error().type() + ", reason: " + item.error().reason());
                 }
             }
         }
