@@ -1,6 +1,7 @@
 package dev.langchain4j.store.embedding.elasticsearch;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch._types.BulkIndexByScrollFailure;
 import co.elastic.clients.elasticsearch._types.InlineScript;
 import co.elastic.clients.elasticsearch._types.mapping.DenseVectorProperty;
 import co.elastic.clients.elasticsearch._types.mapping.Property;
@@ -8,9 +9,7 @@ import co.elastic.clients.elasticsearch._types.mapping.TextProperty;
 import co.elastic.clients.elasticsearch._types.mapping.TypeMapping;
 import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.elasticsearch._types.query_dsl.ScriptScoreQuery;
-import co.elastic.clients.elasticsearch.core.BulkRequest;
-import co.elastic.clients.elasticsearch.core.BulkResponse;
-import co.elastic.clients.elasticsearch.core.SearchResponse;
+import co.elastic.clients.elasticsearch.core.*;
 import co.elastic.clients.elasticsearch.core.bulk.BulkResponseItem;
 import co.elastic.clients.json.JsonData;
 import co.elastic.clients.json.JsonpMapper;
@@ -41,10 +40,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 
 import static dev.langchain4j.internal.Utils.*;
 import static dev.langchain4j.internal.ValidationUtils.*;
@@ -269,6 +265,63 @@ public class ElasticsearchEmbeddingStore implements EmbeddingStore<TextSegment> 
         }
     }
 
+    @Override
+    public void remove(String id) {
+        try {
+            client.delete(DeleteRequest.of(d -> d.index(indexName).id(id)));
+        } catch (IOException e) {
+            log.error("[ElasticSearch remove I/O Exception]", e);
+            throw new ElasticsearchRequestFailedException(e.getMessage());
+        }
+    }
+
+    @Override
+    public void removeAll(Collection<String> ids) {
+        try {
+            BulkRequest.Builder bulkBuilder = new BulkRequest.Builder();
+            ids.forEach(id -> bulkBuilder.operations(op -> op.delete(d -> d.index(indexName).id(id))));
+            BulkResponse response = client.bulk(bulkBuilder.build());
+            if (response.errors()) {
+                for (BulkResponseItem item : response.items()) {
+                    if (item.error() != null) {
+                        throw new ElasticsearchRequestFailedException("type: " + item.error().type() + ", reason: " + item.error().reason());
+                    }
+                }
+            }
+        } catch (IOException e) {
+            log.error("[ElasticSearch remove I/O Exception]", e);
+            throw new ElasticsearchRequestFailedException(e.getMessage());
+        }
+    }
+
+    @Override
+    public void removeAll(Filter filter) {
+        try {
+            Query query = ElasticsearchMetadataFilterMapper.map(filter);
+            DeleteByQueryRequest queryRequest = new DeleteByQueryRequest.Builder()
+                    .query(query)
+                    .build();
+            deleteQueryResponse(client.deleteByQuery(queryRequest));
+        } catch (IOException e) {
+            log.error("[ElasticSearch remove I/O Exception]", e);
+            throw new ElasticsearchRequestFailedException(e.getMessage());
+        }
+    }
+
+    @Override
+    public void removeAll() {
+        try {
+            DeleteByQueryRequest queryRequest = new DeleteByQueryRequest.Builder()
+                    .index(indexName)
+                    .query(q -> q.matchAll(m -> m))
+                    .build();
+            deleteQueryResponse(client.deleteByQuery(queryRequest));
+        } catch (IOException e) {
+            log.error("[ElasticSearch remove I/O Exception]", e);
+            throw new ElasticsearchRequestFailedException(e.getMessage());
+        }
+    }
+
     private ScriptScoreQuery buildScriptScoreQuery(float[] vector,
                                                    float minScore,
                                                    Filter filter
@@ -379,5 +432,15 @@ public class ElasticsearchEmbeddingStore implements EmbeddingStore<TextSegment> 
                                         : TextSegment.from(document.getText(), new Metadata(document.getMetadata()))
                         )).orElse(null))
                 .collect(toList());
+    }
+
+    private void deleteQueryResponse(DeleteByQueryResponse response) {
+        if (response != null && response.failures() != null) {
+            for (BulkIndexByScrollFailure item : response.failures()) {
+                if (item.cause() != null) {
+                    throw new ElasticsearchRequestFailedException("type: " + item.cause().type() + ", reason: " + item.cause().reason());
+                }
+            }
+        }
     }
 }
